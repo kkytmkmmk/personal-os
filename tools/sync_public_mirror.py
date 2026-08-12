@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-PUBLIC_REPOSITORY = "kkytmkmmk/personal-os-pb"
+PUBLIC_REPOSITORY = "kkytmkmmk/personal-os"
 PUBLIC_MIRROR_BRANCH = "master"
 
 

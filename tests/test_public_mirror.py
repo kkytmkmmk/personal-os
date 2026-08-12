@@ -16,7 +16,7 @@ class PublicMirrorTests(unittest.TestCase):
         self.assertIn("workflow_dispatch:", workflow)
         self.assertIn("\n  push:\n    branches:\n      - master", workflow)
         self.assertNotIn("\n  pull_request:", workflow)
-        self.assertIn("kkytmkmmk/personal-os-pb", workflow)
+        self.assertIn("kkytmkmmk/personal-os", workflow)
         self.assertIn("PUBLIC_REPO_TOKEN", workflow)
         self.assertIn("master", workflow)
         self.assertIn("GIT_ASKPASS", workflow)
