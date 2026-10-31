@@ -19,6 +19,7 @@ venv/
 *.log
 *.posbackup
 imports/
+codex-analysis/
 attachments/
 .private_terms
 .DS_Store
