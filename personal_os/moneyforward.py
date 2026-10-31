@@ -55,7 +55,7 @@ def _current_group_id(connection: sqlite3.Connection) -> str | None:
     return str(row["id"]) if row else None
 
 
-def moneyforward_projection(database_path: str | Path | None, *, transaction_limit: int = 50) -> dict[str, object]:
+def _legacy_projection(database_path: str | Path | None, *, transaction_limit: int = 50) -> dict[str, object]:
     """Return a bounded local projection without modifying the source DB."""
     if not database_path or not str(database_path).strip():
         return _unavailable("not_configured", configured=False, message="Money Forward連携は未設定です。")
@@ -226,3 +226,21 @@ def moneyforward_projection(database_path: str | Path | None, *, transaction_lim
             configured=True,
             message="Money Forward DBを読み込めませんでした。更新処理の完了後に再試行してください。",
         )
+
+
+def moneyforward_projection(database_path: str | Path | None, *, transaction_limit: int = 50,
+                            snapshot_directory: Path | None = None) -> dict[str, object]:
+    """Choose the newest complete source; never mix dates or source totals."""
+    legacy = _legacy_projection(database_path, transaction_limit=transaction_limit)
+    if snapshot_directory is not None:
+        from personal_os.moneyforward_sync import connector_projection
+        try:
+            connector = connector_projection(snapshot_directory)
+        except (OSError, ValueError):
+            legacy["sync_error"] = "更新データを読み込めませんでした。再度取り込んでください。"
+            return legacy
+        legacy_dates = [str(legacy.get("snapshot_date") or "")]
+        legacy_dates += [str(item["date"]) for item in legacy.get("asset_history", [])]
+        if connector and (not legacy.get("connected") or connector["snapshot_date"] >= max(legacy_dates)):
+            return connector
+    return legacy

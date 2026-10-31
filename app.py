@@ -33,6 +33,7 @@ from urllib.parse import parse_qs, urlparse
 from personal_os.ingest import detect_image_mime, multipart_file, multipart_form_file
 from personal_os.llm_ollama import OllamaClient
 from personal_os.moneyforward import moneyforward_projection
+from personal_os.moneyforward_sync import import_snapshot as import_moneyforward_snapshot, MAX_BYTES as MONEYFORWARD_MAX_BYTES
 from personal_os.ocr import extract_text as extract_ocr_text, is_sufficient as ocr_is_sufficient
 
 ROOT = Path(__file__).resolve().parent
@@ -6729,7 +6730,7 @@ def domain_projection(domain: str) -> dict[str, object]:
     }
     if domain == "money":
         summary = _money_summary(facts, transactions)
-        moneyforward = moneyforward_projection(MONEYFORWARD_DB_PATH)
+        moneyforward = moneyforward_projection(MONEYFORWARD_DB_PATH, snapshot_directory=ATTACHMENT_DIR / "integrations" / "moneyforward")
         result["moneyforward"] = moneyforward
         if moneyforward.get("connected"):
             if moneyforward.get("total_assets") is not None:
@@ -9260,7 +9261,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/today":
             return self.send_json(today_snapshot())
         if path == "/api/integrations/moneyforward":
-            return self.send_json(moneyforward_projection(MONEYFORWARD_DB_PATH))
+            return self.send_json(moneyforward_projection(MONEYFORWARD_DB_PATH, snapshot_directory=ATTACHMENT_DIR / "integrations" / "moneyforward"))
         cycle_match = re.fullmatch(r"/api/cycles/(\d+)", path)
         if cycle_match:
             cycle = cycle_snapshot(int(cycle_match.group(1)))
@@ -9346,6 +9347,18 @@ class Handler(BaseHTTPRequestHandler):
             return self.wfile.write(body)
         if not self._authorize(True):
             return
+        if path == "/api/integrations/moneyforward/import":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 0 < length <= MONEYFORWARD_MAX_BYTES:
+                    raise ValueError("更新JSONは8MB以内にしてください。")
+                payload = json.loads(self.rfile.read(length).decode("utf-8"))
+                result = import_moneyforward_snapshot(ATTACHMENT_DIR / "integrations" / "moneyforward", payload)
+                return self.send_json(result, HTTPStatus.CREATED)
+            except (ValueError, TypeError) as error:
+                return self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+            except OSError:
+                return self.send_json({"error": "更新データを保存できませんでした。空き容量と保存先を確認してください。"}, HTTPStatus.INTERNAL_SERVER_ERROR)
         presented_match = re.fullmatch(r"/api/review-inbox/(fact|memory-proposal)/(\d+)/presented", path)
         if presented_match:
             item_kind, raw_id = presented_match.groups()

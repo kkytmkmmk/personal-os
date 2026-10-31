@@ -104,6 +104,7 @@
     'screenshot-form': { path: '/api/import/screenshot', method: 'POST', notice: '#screenshot-notice', success: '保存しました。AIがバックグラウンドで整理します。' },
     'benchmark-import-form': { path: '/api/benchmarks/import', method: 'POST', notice: '#benchmark-import-notice', success: '保存しました。' },
     'decision-outcome-form': { path: '/api/decisions/', method: 'PATCH', notice: '#decision-outcome-notice', success: '保存しました。' },
+    'moneyforward-import-form': { path: '/api/integrations/moneyforward/import', method: 'POST', notice: '#moneyforward-import-notice', success: '更新データを反映しました。' },
   };
 
   function mutationFor(form) { return mutationConfig[form?.id] || null; }
@@ -582,14 +583,15 @@
     };
     const moneyForwardSection = integration => {
       if (!integration) return '';
+      const updateControls = '<details><summary>マネーフォワード情報を更新</summary><p class="help">このチャットで「マネーフォワードを更新して」と依頼すると最新データを反映できます。更新用JSONをお持ちの場合は、ここから取り込めます。</p><form id="moneyforward-import-form"><label for="moneyforward-update-file">更新データ（JSON）</label><input id="moneyforward-update-file" name="snapshot" type="file" accept="application/json,.json" required><button type="submit">更新データを取り込む</button><p id="moneyforward-import-notice" role="status" aria-live="polite"></p></form></details>';
       if (!integration.connected) {
-        return `<section class="domain-integration"><h3>Money Forward連携</h3><div class="summary-card"><p class="help">${escapeHtml(integration.message || '連携状態を確認できませんでした。')}</p></div></section>`;
+        return `<section class="domain-integration"><h3>マネーフォワード連携</h3><div class="summary-card"><p class="help">${escapeHtml(integration.message || '連携状態を確認できませんでした。')}</p></div>${updateControls}</section>`;
       }
       const yen = value => `${Number(value || 0).toLocaleString('ja-JP')}円`;
       const latestFlow = (integration.monthly_cashflow || []).at(-1);
       const holdings = (integration.holdings || []).slice(0, 12).map(item => `<div class="summary-line"><span>${escapeHtml(item.name || item.category || '資産')}</span><b>${yen(item.amount)}</b></div>`).join('');
       const transactions = (integration.recent_transactions || []).slice(0, 12).map(item => `<div class="summary-line"><span>${escapeHtml(`${item.date || ''} ${item.category || item.description || '取引'}`.trim())}</span><b>${item.type === 'expense' ? '−' : item.type === 'income' ? '＋' : ''}${yen(item.amount)}</b></div>`).join('');
-      return `<section class="domain-integration"><div class="entry-head"><h3>Money Forward連携</h3><span class="pill">読取専用</span></div><div class="summary-card"><div class="summary-grid"><div><span>反映日</span><b>${escapeHtml(integration.snapshot_date || '取得中')}</b></div><div><span>保有明細</span><b>${Number(integration.holdings_count || 0).toLocaleString('ja-JP')}件</b></div><div><span>今月の収入</span><b>${latestFlow ? yen(latestFlow.income) : '未取得'}</b></div><div><span>今月の支出</span><b>${latestFlow ? yen(latestFlow.expense) : '未取得'}</b></div></div><p class="source">Money Forward側のローカルDBを直接変更せず参照しています。最終連携: ${escapeHtml(integration.last_synced_at || '不明')}</p></div>${holdings ? `<details><summary>主な保有明細</summary>${holdings}</details>` : ''}${transactions ? `<details><summary>最近の入出金</summary>${transactions}</details>` : ''}</section>`;
+      return `<section class="domain-integration"><div class="entry-head"><h3>マネーフォワード連携</h3><span class="pill">読取専用</span></div><div class="summary-card"><div class="summary-grid"><div><span>残高基準日</span><b>${escapeHtml(integration.balance_date || integration.snapshot_date || integration.asset_history?.at(-1)?.date || '未取得')}</b></div><div><span>保有明細</span><b>${Number(integration.holdings_count || 0).toLocaleString('ja-JP')}件</b></div><div><span>${escapeHtml(latestFlow?.month || '')} 収入</span><b>${latestFlow ? yen(latestFlow.income) : '未取得'}</b></div><div><span>${escapeHtml(latestFlow?.month || '')} 支出</span><b>${latestFlow ? yen(latestFlow.expense) : '未取得'}</b></div></div>${integration.net_assets !== undefined ? `<p>資産（負債控除前） ${yen(integration.total_assets)} ／ 負債 ${yen(integration.liabilities)} ／ 純資産 ${yen(integration.net_assets)}</p>` : ''}<p class="source">${escapeHtml(integration.message || 'ローカルDBを読み取り専用で参照しています。')} 取得日時: ${escapeHtml(integration.last_synced_at || '不明')}</p>${integration.sync_error ? `<p role="alert">${escapeHtml(integration.sync_error)}</p>` : ''}</div>${updateControls}${holdings ? `<details><summary>主な保有明細（取得時点の最新情報）</summary>${holdings}</details>` : ''}${transactions ? `<details><summary>取得した最近の入出金</summary>${transactions}</details>` : ''}</section>`;
     };
     const wrapped = async domain => {
       const root = $(`#${domain}-content`); if (!root) return;
@@ -607,6 +609,26 @@
         const rootEvidence = [...(data.current || [])].filter((item, index, items) => items.findIndex(other => String(other.evidence_id || other.id) === String(item.evidence_id || item.id)) === index);
         root.innerHTML = `<section class="domain-current"><h3>現在の要約</h3><div class="summary-card">${currentSummary(domain, data.summary || {})}</div><div class="domain-grid">${(data.current || []).map(item => factCard(item)).join('') || empty('現在の情報がまだありません')}</div></section>${domain === 'money' ? moneyForwardSection(data.moneyforward) : ''}<section class="domain-recent"><h3>最近の変化</h3><div class="domain-recent-changes summary-card">${recent.length ? recent.map(change => `<div class="summary-line"><span>${escapeHtml(change.fact_summary || '記憶の更新')}</span><b>${escapeHtml(change.change_type || '更新')}</b></div>`).join('') : empty('最近の変化はまだありません', false)}</div></section><section class="domain-decisions"><h3>関連する判断</h3>${decisions.length ? decisions.map(decision => `<article class="domain-fact"><b>${escapeHtml(decision.title || decision.decision || '判断')}</b><div class="source">${domainLabel(decision.domain)} ・ ${escapeHtml(decision.status || decision.decision_state || '')}</div>${decision.result ? `<details><summary>結果を表示</summary><div class="body">${escapeHtml(decision.result)}</div></details>` : '<p class="help">結果待ちです</p>'}</article>`).join('') : empty('この領域の進行中の判断はありません', false)}</section><section class="domain-history"><h3>履歴</h3>${history.length ? history.map(item => factCard(item, true)).join('') : empty('まだ履歴はありません')}</section><section class="domain-evidence"><h3>根拠</h3>${rootEvidence.length ? rootEvidence.map(item => `<details class="technical-detail"><summary>${escapeHtml(item.summary || '記憶')} の根拠</summary><p class="source">${escapeHtml(item.document_title || '原文')} / ${escapeHtml(item.extractor || '')} ${escapeHtml(item.extractor_model || '')} / Evidence ${Number(item.evidence_count || 0)}件</p><div class="body">${escapeHtml(String(item.evidence || '確認できる根拠がまだありません。').slice(0, 1200))}</div></details>`).join('') : empty('確認できる根拠がまだありません')}</section>`;
         $$('[data-domain-record]', root).forEach(button => button.addEventListener('click', () => { navigate('home'); window.setTimeout(() => $('#record-text')?.focus(), 0); }));
+        $('#moneyforward-import-form', root)?.addEventListener('submit', async event => {
+          event.preventDefault();
+          const form = event.currentTarget;
+          if (event.defaultPrevented && form.dataset.importBusy === 'true') return;
+          form.dataset.importBusy = 'true';
+          setMutationState(form, 'submitting', '更新データを確認しています…');
+          try {
+            const file = form.elements.snapshot.files[0];
+            if (!file || file.size > 8 * 1024 * 1024) throw new Error('8MB以内の更新JSONを選択してください。');
+            const payload = JSON.parse(await file.text());
+            const response = await fetch('/api/integrations/moneyforward/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+            const result = await response.json();
+            if (!response.ok) throw new Error(result.error || '更新できませんでした。');
+            await wrapped('money');
+            const notice = $('#moneyforward-import-notice', root);
+            if (notice) { notice.closest('details').open = true; notice.textContent = result.message || '更新データを反映しました。'; }
+          } catch (error) {
+            setMutationState(form, 'error', error.message || '更新できませんでした。選択したファイルは保持しています。');
+          } finally { form.dataset.importBusy = 'false'; }
+        });
         $$('[data-domain-correct]', root).forEach(button => button.addEventListener('click', () => window.correctDomainFact?.(Number(button.dataset.domainCorrect), button.dataset.domainSummary || '', button.dataset.domainAmount || '')));
       } catch {
         root.innerHTML = `<section class="domain-current"><h3>${labels[domain] || '領域'}の情報</h3>${empty('情報を読み込めませんでした。入力内容は失われていません。')}</section>`;
