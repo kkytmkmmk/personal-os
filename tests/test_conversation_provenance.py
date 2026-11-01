@@ -73,6 +73,18 @@ class ConversationProvenanceTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 app.save_structured_facts(entry, [], "codex", "sample", source_chunk_id=999999)
 
+    def test_consultation_keyword_and_semantic_search_exclude_assistant_only_text(self):
+        with isolated_personal_os():
+            own = add_entry("SampleKeyword user", "user: 私のSampleKeyword UserOnlyMarkerのメモです。", "chatgpt-export")
+            other = add_entry("SampleKeyword assistant", "assistant: SampleKeyword AssistantOnlyMarkerの説明です。", "chatgpt-export")
+            app.process_embedding_jobs(20)
+            semantic = app.semantic_search("SampleKeyword")
+            self.assertTrue(any(row["id"] == own for row in semantic))
+            self.assertFalse(any(row["id"] == other for row in semantic))
+            retrieved = app.relevant_memories("SampleKeyword")
+            self.assertTrue(any("UserOnlyMarker" in str(item) for item in retrieved))
+            self.assertFalse(any("AssistantOnlyMarker" in str(item) for item in retrieved))
+
     def test_relevance_correction_can_restore_auto_rejection_but_not_manual_rejection(self):
         with isolated_personal_os():
             quote = "17時にはホテルに戻りたい。"

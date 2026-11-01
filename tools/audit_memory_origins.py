@@ -68,13 +68,39 @@ def find_candidates():
     return candidates
 
 
+def repair_audited_source_roles():
+    changed = 0
+    with app.db() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        entries = connection.execute(
+            """SELECT DISTINCT e.id FROM entries e JOIN documents d ON d.legacy_entry_id=e.id
+               JOIN chunks c ON c.document_id=d.id JOIN facts f ON f.source_chunk_id=c.id
+               JOIN memory_corrections m ON m.fact_id=f.id
+               WHERE m.correction_type='assistant_origin_quarantine' AND c.speaker_role!='assistant'"""
+        ).fetchall()
+        for entry in entries:
+            raw = connection.execute("SELECT body FROM entries WHERE id=?", (entry["id"],)).fetchone()[0]
+            chunks = connection.execute(
+                """SELECT DISTINCT c.id,c.text FROM chunks c JOIN documents d ON d.id=c.document_id
+                   JOIN facts f ON f.source_chunk_id=c.id JOIN memory_corrections m ON m.fact_id=f.id
+                   WHERE d.legacy_entry_id=? AND m.correction_type='assistant_origin_quarantine'
+                     AND c.speaker_role!='assistant'""", (entry["id"],)
+            ).fetchall()
+            for chunk in chunks:
+                if original_roles(chunk["text"], raw) == {"assistant"}:
+                    connection.execute("UPDATE chunks SET speaker_role='assistant' WHERE id=?", (chunk["id"],))
+                    changed += 1
+    return changed
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--repair-audited-roles", action="store_true")
     args = parser.parse_args()
     candidates = find_candidates()
     print(json.dumps({"assistant_only_candidates": len(candidates), "apply": args.apply}), flush=True)
-    if not candidates or not args.apply:
+    if not args.apply or (not candidates and not args.repair_audited_roles):
         return
     backup = app.backup_database(force=True)
     if not app.verify_backup(str(backup))["valid"]:
@@ -94,11 +120,16 @@ def main():
                    validation_reason='原文ではAI側の発言のみが根拠。本人Evidenceの再解析待ち',truth_confidence=MIN(COALESCE(truth_confidence,0),0.49)
                    WHERE id=?""", (fact_id,)
             )
+            connection.execute(
+                "UPDATE chunks SET speaker_role='assistant' WHERE id=(SELECT source_chunk_id FROM facts WHERE id=?)",
+                (fact_id,),
+            )
             app._record_memory_correction(connection, fact_id=fact_id, entity_id=None,
                 correction_type="assistant_origin_quarantine", before={"retrieval_eligibility": "eligible"},
                 after={"retrieval_eligibility": "pending"}, reason="原文上の発言者がassistantのみ", source="origin_audit")
             changed += 1
-    print(json.dumps({"quarantined": changed, "backup": backup.name}), flush=True)
+    repaired_roles = repair_audited_source_roles() if args.repair_audited_roles else 0
+    print(json.dumps({"quarantined": changed, "source_roles_repaired": repaired_roles, "backup": backup.name}), flush=True)
 
 
 if __name__ == "__main__": main()

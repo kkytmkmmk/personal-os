@@ -1984,7 +1984,7 @@ def semantic_search(message: str, limit: int = 8) -> list[dict[str, str]]:
             """SELECT e.id,e.title,c.text AS body,e.kind,e.created_at,em.vector_json
                FROM embeddings em JOIN chunks c ON c.id=em.chunk_id
                JOIN documents d ON d.id=c.document_id JOIN entries e ON e.id=d.legacy_entry_id
-               WHERE em.model=?
+               WHERE em.model=? AND c.is_active=1 AND c.speaker_role NOT IN ('assistant','system')
                  AND (
                    EXISTS (
                      SELECT 1 FROM facts good LEFT JOIN fact_reviews gr ON gr.fact_id=good.id
@@ -4239,7 +4239,7 @@ def retrieval_context(message: str, limit: int = 18) -> dict[str, object]:
                            (SELECT COUNT(*) FROM facts cf WHERE cf.source_chunk_id=c.id AND (cf.retrieval_eligibility='conflict' OR EXISTS (SELECT 1 FROM fact_currentness cc WHERE cc.fact_id=cf.id AND cc.state='unknown'))) AS conflict_count
                     FROM chunks c JOIN documents d ON d.id=c.document_id
                     JOIN entries e ON e.id=d.legacy_entry_id
-                    WHERE c.is_active=1 AND ({clauses})
+                    WHERE c.is_active=1 AND c.speaker_role NOT IN ('assistant','system') AND ({clauses})
                       AND (
                         EXISTS (
                           SELECT 1 FROM facts good LEFT JOIN fact_reviews gr ON gr.fact_id=good.id

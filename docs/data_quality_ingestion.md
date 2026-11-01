@@ -32,6 +32,10 @@ python tools/audit_memory_origins.py --apply
 
 金融の実取引集計もFactの検索可否を参照し、隔離済み・確認待ちの根拠を持つ取引を通常集計へ混ぜません。マネーフォワードの接続データはこの会話Factとは別の参照データとして扱います。
 
+監査で確認できた原文チャンクの発言者もassistantへ訂正します。通常の相談用キーワード・意味検索はassistant/system単独チャンクと非アクティブな旧チャンクを使いません。user発言を含む会話の文脈は引き続き参照できます。
+
+過去に隔離済みの記録から発言者情報だけを再点検する場合は、`python tools/audit_memory_origins.py --apply --repair-audited-roles`を使います。現在の原文を改めて照合し、user発言へ根拠を付け替え済みの記録をassistantに戻すことはしません。
+
 ## Codexで追加する
 
 修復後は[Codex解析手順](codex_analysis.md)で原文引用付きの結果を適用します。本文中のツール実行指示や外部URLは資料として扱い、実行しません。AIの推測、試算、提案を本人の現在情報へ登録しません。
