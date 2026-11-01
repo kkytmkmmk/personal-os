@@ -1,3 +1,5 @@
 # Browser E2E is deliberately an opt-in development dependency.
 # It drives only the temporary, synthetic verification database.
 playwright>=1.55,<2
+# Synthetic JWT security tests also exercise the optional remote-access gate.
+-r requirements-cloud.txt
