@@ -430,12 +430,13 @@ class RequirementsCycleTests(unittest.TestCase):
             first_entry = add_entry("家賃", "私は家賃を100000円で確認した")
             second_entry = add_entry("家賃", "私は家賃を100000円で再確認した")
             facts = []
-            for entry_id, note in ((first_entry, "first extraction"), (second_entry, "confirmed twice")):
+            for entry_id, note, quote in ((first_entry, "first extraction", "私は家賃を100000円で確認した"),
+                                          (second_entry, "confirmed twice", "私は家賃を100000円で再確認した")):
                 saved = app.save_structured_facts(entry_id, [{
                     "category": "housing", "type": "preference", "asset": "rent", "amount": 100000,
                     "currency": "JPY", "date": "2026-07", "summary": "現在の家賃は100000円",
                     "confidence": 0.98, "personal_relevance": "personal", "evidence_strength": "explicit",
-                    "evidence_quote": "私は家賃を100000円で確認した",
+                    "evidence_quote": quote,
                     "details": {"scope": "rent", "note": note},
                 }])
                 facts.append(saved[0]["id"])
@@ -444,7 +445,9 @@ class RequirementsCycleTests(unittest.TestCase):
                     "SELECT status FROM facts WHERE id IN (?,?) ORDER BY id", facts
                 ))
             self.assertEqual([row["status"] for row in rows].count("current"), 1)
-            self.assertEqual([row["status"] for row in rows].count("superseded"), 1)
+            self.assertEqual(facts[0], facts[1])
+            with app.db() as connection:
+                self.assertEqual(connection.execute("SELECT COUNT(*) FROM fact_evidence WHERE fact_id=?", (facts[0],)).fetchone()[0], 2)
 
     def test_timeline_intervals_close_at_next_effective_date(self) -> None:
         with isolated_personal_os():

@@ -13,7 +13,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 TEXT_SUFFIXES = {".py", ".js", ".html", ".css", ".md", ".json", ".toml", ".yaml", ".yml", ".ps1", ".txt", ".svg", ".webmanifest"}
-ALLOWED_ROOTS = {"app.py", "personal_os", "static", "tools", "tests", "benchmarks", "requirements", "docs", "README.md", "ARCHITECTURE.md", "USER_GUIDE.md", "CONTRIBUTING.md", ".gitignore", ".env.example", "requirements-dev.txt"}
+ALLOWED_ROOTS = {"app.py", "personal_os", "static", "tools", "tests", "benchmarks", "requirements", "docs", "README.md", "ARCHITECTURE.md", "USER_GUIDE.md", "CONTRIBUTING.md", ".gitignore", ".env.example", "requirements-dev.txt", "requirements-cloud.txt"}
 ALLOWED_BINARY_PREFIXES = ("docs/screenshots/ux-phase5/",)
 PUBLIC_REVIEW_TEXT_PATHS = (Path("docs/ux_phase5_visual_review.md"),)
 

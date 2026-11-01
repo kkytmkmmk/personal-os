@@ -26,7 +26,7 @@ python tools/create_verification_db.py `
 .\tools\start_verification.ps1
 ```
 
-検証環境は `data/verification/personal_os_verification.db` と固定ポート `8877`、本番環境は `data/personal_os.db` と固定ポート `8787` を使用します。起動スクリプトが環境変数を設定・整理するため、DBとポートの組み合わせを取り違えません。
+検証環境は `data/verification/personal_os_verification.db` と固定ポート `8877`、本番環境は `data/personal_os.db` と固定ポート `8788` を使用します。起動スクリプトが環境変数を設定・整理するため、DBとポートの組み合わせを取り違えません。
 
 ## 正本への反映
 

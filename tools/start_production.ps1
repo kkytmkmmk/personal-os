@@ -31,17 +31,17 @@ if ($Python -eq "python" -and (Test-Path -LiteralPath (Join-Path $projectRoot ".
 }
 
 $env:PERSONAL_OS_ENV = "production"
-$env:PERSONAL_OS_PORT = "8787"
+$env:PERSONAL_OS_PORT = "8788"
 Remove-Item Env:PERSONAL_OS_DB_PATH -ErrorAction SilentlyContinue
 Remove-Item Env:PERSONAL_OS_BACKUP_DIR -ErrorAction SilentlyContinue
 Remove-Item Env:PERSONAL_OS_ATTACHMENT_DIR -ErrorAction SilentlyContinue
 
-Write-Host "Personal OS production: http://localhost:8787"
+Write-Host "Personal OS production: http://localhost:8788"
 $lanAddress = [System.Net.Dns]::GetHostAddresses([System.Net.Dns]::GetHostName()) |
     Where-Object { $_.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork -and $_.IPAddressToString -notlike '127.*' -and $_.IPAddressToString -notlike '169.254.*' } |
     Select-Object -First 1 -ExpandProperty IPAddressToString
 if ([string]::IsNullOrWhiteSpace($lanAddress)) { $lanAddress = '127.0.0.1' }
-Write-Host "iPhone (same Wi-Fi): http://${lanAddress}:8787"
+Write-Host "iPhone (same Wi-Fi): http://${lanAddress}:8788"
 Push-Location $projectRoot
 try {
     & $Python "app.py"

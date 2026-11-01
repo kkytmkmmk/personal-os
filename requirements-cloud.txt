@@ -1,0 +1,2 @@
+# Optional dependencies for a Cloudflare Access protected Tunnel origin.
+PyJWT[crypto]>=2.10,<3

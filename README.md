@@ -31,6 +31,8 @@ See the [Decision Replay visual review](docs/decision_replay_visual_review.md) f
 
 ## Decision Replay and first use
 
+- For owner-only remote use without moving SQLite or Ollama off the PC, see [Cloudflare Tunnel and Access](docs/cloudflare_owner_access.md). Public hostname and owner authentication must be configured and verified before publishing; the setup planner itself never creates a public endpoint.
+
 - Decision Replay keeps consultation recommendations separate from the user's own decision, execution, result and later evaluation. Viewing a replay never writes a Fact or Decision.
 - The Settings screen includes a local-only feedback form and an operational-readiness card for the SQLite integrity check, last backup and stale analysis-job status.
 - Before importing real history, follow [the first-real-use checklist](docs/first_real_use.md). It explains backups, local/cloud extraction controls and incremental import.
@@ -83,7 +85,7 @@ cd personal-os
 .\tools\start_production.ps1
 ```
 
-本番は `data/personal_os.db` と固定ポート `8787` を使用します。ブラウザで `http://localhost:8787` を開きます。同一 Wi-Fi の iPhone からは、起動時に表示される LAN URL を Safari で開いてください。PWA マニフェストと Service Worker を含むため、Safari の「ホーム画面に追加」も利用できます。
+本番は `data/personal_os.db` と固定ポート `8788` を使用します。ブラウザで `http://localhost:8788` を開きます。同一 Wi-Fi の iPhone からは、起動時に表示される LAN URL を Safari で開いてください。PWA マニフェストと Service Worker を含むため、Safari の「ホーム画面に追加」も利用できます。
 
 ### Money Forwardローカル連携
 

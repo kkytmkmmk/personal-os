@@ -34,6 +34,8 @@ from personal_os.ingest import detect_image_mime, multipart_file, multipart_form
 from personal_os.llm_ollama import OllamaClient
 from personal_os.moneyforward import moneyforward_projection
 from personal_os.conversation_chunks import split_conversation
+from personal_os.evidence_quotes import bind_quote
+from personal_os.cloudflare_access import from_environment as cloudflare_access_from_environment, AccessFailure
 from personal_os.moneyforward_sync import import_snapshot as import_moneyforward_snapshot, MAX_BYTES as MONEYFORWARD_MAX_BYTES
 from personal_os.ocr import extract_text as extract_ocr_text, is_sufficient as ocr_is_sufficient
 
@@ -41,7 +43,7 @@ ROOT = Path(__file__).resolve().parent
 APP_ENV = os.environ.get("PERSONAL_OS_ENV", "production").strip().lower()
 if APP_ENV not in {"production", "verification"}:
     raise RuntimeError("PERSONAL_OS_ENV must be 'production' or 'verification'")
-PRODUCTION_PORT = 8787
+PRODUCTION_PORT = 8788
 VERIFICATION_PORT = 8877
 APP_PORT = VERIFICATION_PORT if APP_ENV == "verification" else PRODUCTION_PORT
 DEFAULT_DB_PATH = (
@@ -66,6 +68,7 @@ ANALYSIS_PREFILTER_LOCK = threading.Lock()
 ANALYSIS_PREFILTER_SCOPE: tuple[str, str, str] | None = None
 ANALYSIS_PREFILTER_SCOPES: set[tuple[str, str, str]] = set()
 RUNTIME_INSTANCE_ID = uuid.uuid4().hex
+CLOUDFLARE_ACCESS = cloudflare_access_from_environment()
 RUNTIME_LEASE_SECONDS = 75
 RUNTIME_LEASED = False
 SERVER: ThreadingHTTPServer | None = None
@@ -293,10 +296,18 @@ def acquire_runtime_lease(port: int) -> tuple[bool, dict[str, object] | None]:
 
 
 def recover_interrupted_analysis() -> int:
-    """A lease owner can safely recover work abandoned by a prior process."""
+    """Recover abandoned work, but never steal a live standalone worker's lock."""
     if not RUNTIME_LEASED:
         return 0
     with db() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        cutoff = (datetime.now(timezone.utc).astimezone() - timedelta(minutes=15)).isoformat(timespec="seconds")
+        active = connection.execute(
+            "SELECT 1 FROM analysis_locks WHERE lock_name='gemini-import-analysis' AND acquired_at>=?",
+            (cutoff,),
+        ).fetchone()
+        if active:
+            return 0
         connection.execute("DELETE FROM analysis_locks WHERE lock_name='gemini-import-analysis'")
         cursor = connection.execute(
             """UPDATE analysis_jobs SET status='pending', error='interrupted process recovered',
@@ -5186,6 +5197,16 @@ def record_fact_evidence(connection: sqlite3.Connection, fact_id: int, *, source
         source_attachment_id=source_attachment_id,
         fallback_group=source_group,
     )
+    if source_chunk_id and quote:
+        actual = connection.execute("SELECT text FROM chunks WHERE id=?", (source_chunk_id,)).fetchone()
+        if actual and quote in user_evidence_text(actual["text"]):
+            previous = connection.execute(
+                "SELECT id,quote FROM fact_evidence WHERE fact_id=? AND source_identity=? AND support=?",
+                (fact_id, source_identity, support),
+            ).fetchone()
+            if previous and previous["quote"] not in user_evidence_text(actual["text"]):
+                connection.execute("UPDATE fact_evidence SET quote=?,reliability=? WHERE id=?",
+                                   (quote[:4000], reliability, previous["id"]))
     connection.execute(
         """INSERT INTO fact_evidence(fact_id,evidence_kind,source_chunk_id,source_attachment_id,source_group,source_identity,quote,support,reliability,created_at)
            SELECT ?,?,?,?,?,?,?,?,?,?
@@ -5222,12 +5243,19 @@ def fact_trust_evaluation(connection: sqlite3.Connection, fact_id: int, fact: di
                           source_created_at: str | None = None) -> dict[str, object]:
     """Evaluate truth confidence from independent Evidence rather than row count."""
     evidence_rows = connection.execute(
-        """SELECT id,evidence_kind,source_group,source_identity,quote,support,reliability,created_at
-           FROM fact_evidence WHERE fact_id=? ORDER BY created_at,id""",
+        """SELECT ev.id,ev.evidence_kind,ev.source_group,ev.source_identity,ev.quote,ev.support,ev.reliability,ev.created_at,
+                  c.text AS actual_source,d.source AS document_source,ev.source_attachment_id
+           FROM fact_evidence ev LEFT JOIN chunks c ON c.id=ev.source_chunk_id
+           LEFT JOIN documents d ON d.id=c.document_id
+           WHERE ev.fact_id=? ORDER BY ev.created_at,ev.id""",
         (fact_id,),
     ).fetchall()
     grouped: dict[tuple[str, str], sqlite3.Row] = {}
     for row in evidence_rows:
+        if row["document_source"] == "chatgpt-export" and not row["source_attachment_id"]:
+            quote = str(row["quote"] or "").strip()
+            if not quote or quote not in user_evidence_text(row["actual_source"] or ""):
+                continue
         identity = str(row["source_identity"] or f"legacy:{row['id']}")
         key = (identity, str(row["support"]))
         existing = grouped.get(key)
@@ -5399,21 +5427,32 @@ def save_structured_facts(entry_id: int, facts: list[dict], extractor: str | Non
                     "SELECT id FROM entities WHERE entity_type=? AND canonical_name=?", (entity_type, asset_name)
                 ).fetchone()["id"]
             details = dict(fact.get("details", {})) if isinstance(fact.get("details", {}), dict) else {}
-            for metadata_key in ("entity_type", "subject_scope", "personal_relevance", "evidence_strength"):
+            for metadata_key in ("entity_type", "subject_scope", "personal_relevance", "evidence_strength", "evidence_quote"):
                 if fact.get(metadata_key) is not None:
                     details.setdefault(metadata_key, fact.get(metadata_key))
             personal_relevance = str(fact.get("personal_relevance") or details.get("personal_relevance") or "unknown")
             value = {"asset": asset_name, "amount": amount, "currency": currency, "details": details}
             fact_key = canonical_fact_key(category, fact_type, asset_name, details, summary)
             encoded_value = json.dumps(value, ensure_ascii=False, sort_keys=True)
-            duplicate = connection.execute(
-                """SELECT f.id FROM facts f LEFT JOIN fact_reviews r ON r.fact_id=f.id
-                   WHERE f.fact_key=? AND f.value_json=? AND f.status='current'
-                     AND COALESCE(r.state,'pending') != 'rejected' LIMIT 1""",
-                (fact_key, encoded_value),
-            ).fetchone()
+            duplicate_candidates = connection.execute(
+                """SELECT f.id,f.value_json FROM facts f LEFT JOIN fact_reviews r ON r.fact_id=f.id
+                   WHERE f.fact_key=? AND (f.status='current' OR (f.source_chunk_id=? AND COALESCE(f.occurred_on,'')=?))
+                     AND COALESCE(r.state,'pending') != 'rejected' ORDER BY f.id DESC""",
+                (fact_key, chunk["id"] if chunk else None, occurred_on or ""),
+            ).fetchall()
+            duplicate = next((row for row in duplicate_candidates
+                              if canonical_factual_payload(json.loads(row["value_json"] or "{}")) == canonical_factual_payload(value)), None)
             if duplicate:
-                if chunk and source_chunk_id:
+                verified_quote = str(fact.get("evidence_quote") or details.get("evidence_quote") or "").strip()
+                if chunk and verified_quote and verified_quote in user_evidence_text(chunk["text"]):
+                    previous_value = json.loads(duplicate["value_json"] or "{}")
+                    previous_details = previous_value.setdefault("details", {})
+                    previous_details["evidence_quote"] = verified_quote
+                    if fact.get("evidence_strength"):
+                        previous_details["evidence_strength"] = fact["evidence_strength"]
+                    connection.execute("UPDATE facts SET value_json=? WHERE id=?",
+                                       (json.dumps(previous_value, ensure_ascii=False, sort_keys=True), duplicate["id"]))
+                if chunk:
                     old_source = connection.execute(
                         """SELECT f.source_chunk_id,c.is_active
                            FROM facts f LEFT JOIN chunks c ON c.id=f.source_chunk_id
@@ -5536,7 +5575,7 @@ def _queue_analysis_jobs_for_provider(provider: str) -> int:
             (now(), now()),
         )
         rows = connection.execute(
-            """SELECT e.id AS entry_id,e.title,e.body,e.source,d.id AS document_id,
+            """SELECT e.id AS entry_id,e.title,e.source,d.id AS document_id,
                       c.id AS chunk_id,c.text AS chunk_text,
                       a.id AS attachment_id,a.content_hash AS attachment_hash
                FROM entries e JOIN documents d ON d.legacy_entry_id=e.id
@@ -5909,7 +5948,7 @@ def _analyze_imported_conversations(limit: int, provider_name: str | None = None
     for _ in range(limit):
         with db() as connection:
             job = connection.execute(
-                """SELECT j.*,e.id AS entry_id,e.title,e.body,c.text AS chunk_text,c.is_active AS chunk_active,
+                """SELECT j.*,e.id AS entry_id,e.title,CASE WHEN j.job_kind='attachment' THEN substr(e.body,1,8000) ELSE '' END AS body,c.text AS chunk_text,c.is_active AS chunk_active,
                           a.storage_path,a.id AS attachment_id
                    FROM analysis_jobs j
                    JOIN documents d ON d.id=j.document_id JOIN entries e ON e.id=d.legacy_entry_id
@@ -5933,7 +5972,8 @@ def _analyze_imported_conversations(limit: int, provider_name: str | None = None
                 continue
         # One conversation can be long. The beginning is sufficient for a first fact pass and bounds API cost.
         source_text = job["chunk_text"] or job["body"][:8000]
-        input_text = f"会話タイトル: {job['title']}\n\n会話本文（このチャンクのみ）:\n{source_text}"
+        extraction_source = ("user: " + user_evidence_text(source_text)) if job["job_kind"] == "chunk" else source_text
+        input_text = f"会話タイトル: {job['title']}\n\n本人の発言（このチャンクのみ。説明を補完しない）:\n{extraction_source}"
         try:
             if job["job_kind"] == "attachment" and job["storage_path"]:
                 image_bytes = attachment_file_bytes(job["storage_path"])
@@ -5949,6 +5989,17 @@ def _analyze_imported_conversations(limit: int, provider_name: str | None = None
                 facts = None
             if facts is None:
                 facts = extract_with_model(input_text, purpose="import", provider_override=str(job["provider"])) or []
+            if job["job_kind"] == "chunk":
+                user_source = user_evidence_text(source_text)
+                grounded = []
+                for fact in facts:
+                    if not isinstance(fact, dict):
+                        continue
+                    details = fact.get("details") if isinstance(fact.get("details"), dict) else {}
+                    quote = bind_quote(fact.get("evidence_quote") or details.get("evidence_quote") or "", user_source)
+                    if quote:
+                        grounded.append(dict(fact, evidence_quote=quote, details={**details, "evidence_quote": quote}))
+                facts = grounded
             personal_candidates = [fact for fact in facts if fact_policy(fact) != "exclude"]
             facts_saved += len(save_structured_facts(
                 job["entry_id"],
@@ -8633,6 +8684,14 @@ class Handler(BaseHTTPRequestHandler):
             return dict(session)
 
     def _auth_status(self) -> dict[str, object]:
+        if CLOUDFLARE_ACCESS and CLOUDFLARE_ACCESS.requires(self.headers):
+            try:
+                CLOUDFLARE_ACCESS.authorize(self.headers)
+                authenticated = True
+            except AccessFailure:
+                authenticated = False
+            return {"required": False, "authenticated": authenticated, "authentication": "cloudflare",
+                    "password_configured": False, "csrf_token": None}
         password_configured = bool(configured_access_password())
         required = access_auth_required(self.client_address[0])
         session = self._session()
@@ -8640,6 +8699,13 @@ class Handler(BaseHTTPRequestHandler):
                 "csrf_token": session.get("csrf_token") if session else None}
 
     def _authorize(self, state_changing: bool = False) -> bool:
+        if CLOUDFLARE_ACCESS and CLOUDFLARE_ACCESS.requires(self.headers):
+            try:
+                CLOUDFLARE_ACCESS.authorize(self.headers, state_changing)
+                return True
+            except AccessFailure as error:
+                self.send_json({"error": str(error), "error_type": "authentication_error"}, error.status)
+                return False
         if not access_auth_required(self.client_address[0]):
             return True
         if not configured_access_password():
@@ -10503,6 +10569,13 @@ if __name__ == "__main__":
         )
         raise SystemExit(2)
     port = APP_PORT
+    bind_host = os.environ.get("PERSONAL_OS_HOST", "0.0.0.0").strip() or "0.0.0.0"
+    try:
+        # Reserve the listener before opening/migrating the database or starting workers.
+        SERVER = ThreadingHTTPServer((bind_host, port), Handler)
+    except OSError:
+        print(f"Personal OS port {port} is unavailable. The database was not opened.")
+        raise SystemExit(1)
     migration_backup = backup_before_migration("015_action_center_review_inbox_stabilization")
     initialize()
     acquired, existing = acquire_runtime_lease(port)
@@ -10526,9 +10599,8 @@ if __name__ == "__main__":
     threading.Thread(target=embedding_loop, name="local-embedding-worker", daemon=True).start()
     threading.Thread(target=backup_loop, name="local-backup", daemon=True).start()
     threading.Thread(target=runtime_heartbeat_loop, name="runtime-heartbeat", daemon=True).start()
-    bind_host = os.environ.get("PERSONAL_OS_HOST", "0.0.0.0").strip() or "0.0.0.0"
-    SERVER = ThreadingHTTPServer((bind_host, port), Handler)
     try:
         SERVER.serve_forever()
     finally:
         release_runtime_lease()
+        SERVER.server_close()
