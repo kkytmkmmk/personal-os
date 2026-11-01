@@ -1,5 +1,6 @@
 """Finish derived local search indexes in bounded, resumable transactions."""
 import argparse
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -12,6 +13,11 @@ import app
 def process_batch(limit=128):
     with app.db() as connection:
         connection.execute('BEGIN IMMEDIATE')
+        stale = (datetime.now(timezone.utc).astimezone() - timedelta(minutes=5)).isoformat(timespec='seconds')
+        connection.execute(
+            "UPDATE embedding_jobs SET state='pending',last_error='interrupted index worker recovered',updated_at=? "
+            "WHERE state='running' AND updated_at<?", (app.now(), stale),
+        )
         jobs = connection.execute(
             "SELECT j.chunk_id,c.text FROM embedding_jobs j JOIN chunks c ON c.id=j.chunk_id "
             "WHERE j.state IN ('pending','failed') ORDER BY j.chunk_id LIMIT ?",

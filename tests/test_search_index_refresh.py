@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timedelta, timezone
 import unittest
 from unittest.mock import patch
 import app
@@ -37,6 +38,16 @@ class SearchIndexRefreshTests(unittest.TestCase):
             with app.db() as connection:
                 connection.execute("UPDATE embedding_jobs SET state='running'")
             self.assertEqual(process_batch(), 0)
+
+    def test_interrupted_stale_job_is_resumable_without_server(self):
+        with isolated_personal_os():
+            add_entry('Synthetic interrupted worker', '私はSample温泉が好きです。')
+            stale = (datetime.now(timezone.utc).astimezone() - timedelta(minutes=6)).isoformat(timespec='seconds')
+            with app.db() as connection:
+                connection.execute("UPDATE embedding_jobs SET state='running',updated_at=?", (stale,))
+            self.assertEqual(process_batch(), 1)
+            with app.db() as connection:
+                self.assertEqual(connection.execute("SELECT state FROM embedding_jobs").fetchone()[0], 'completed')
 
 
 if __name__ == '__main__':
