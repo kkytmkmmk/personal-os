@@ -2556,6 +2556,7 @@ def fact_has_numeric_outlier(connection: sqlite3.Connection, row: sqlite3.Row, v
         """SELECT other.value_json,other.summary
            FROM facts other JOIN fact_reviews review ON review.fact_id=other.id
            WHERE other.id!=? AND other.fact_key=? AND review.state='confirmed'
+             AND other.retrieval_eligibility='eligible'
              AND COALESCE(other.personal_relevance,'unknown')='personal'""",
         (row["id"], row["fact_key"]),
     ).fetchall()
