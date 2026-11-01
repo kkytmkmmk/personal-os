@@ -39,18 +39,21 @@ def export_packet(limit: int = 5, max_chars: int = 24000) -> dict:
     scope, params = app.current_analysis_job_scope("j")
     with app.db() as connection:
         rows = connection.execute(
-            f"""SELECT j.*,c.text AS source_text,e.id AS entry_id,e.title,d.source_created_at
+            f"""SELECT j.*,c.text AS source_text,e.id AS entry_id,e.title,e.source,d.source_created_at
                 FROM analysis_jobs j JOIN chunks c ON c.id=j.source_chunk_id
                 JOIN documents d ON d.id=j.document_id JOIN entries e ON e.id=d.legacy_entry_id
                 WHERE {scope} AND j.job_kind='chunk' AND j.prompt_version=?
+                  AND (e.source!='chatgpt-export' OR c.segment_version=?)
                   AND (j.status='pending' OR (j.status='failed' AND j.attempts<3))
                 ORDER BY j.priority,COALESCE(j.requested_at,j.created_at),j.id""",
-            (*params, app.PROMPT_VERSION),
+            (*params, app.PROMPT_VERSION, app.CHUNK_VERSION),
         )
         jobs = []
         used = 0
         for row in rows:
             text = row["source_text"]
+            if row["source"] == "chatgpt-export" and app.source_role_for_text(text, row["source"]) not in {"user", "mixed"}:
+                continue
             if used + len(text) > max_chars:
                 continue  # Never truncate a chunk and then mark it fully analysed.
             jobs.append({"job_id": row["id"], "document_id": row["document_id"],
@@ -146,12 +149,14 @@ def apply_results(packet: dict, result: dict, model: str) -> dict:
     with atomic_app_writes() as connection:
         for job_id, item in expected.items():
             job = connection.execute(
-                """SELECT j.*,c.text,c.is_active,d.legacy_entry_id AS entry_id
+                """SELECT j.*,c.text,c.is_active,c.segment_version,d.legacy_entry_id AS entry_id,d.source
                    FROM analysis_jobs j JOIN chunks c ON c.id=j.source_chunk_id
                    JOIN documents d ON d.id=j.document_id WHERE j.id=?""", (job_id,),
             ).fetchone()
             if not job or job["job_kind"] != "chunk" or not job["is_active"]:
                 raise ValueError("Source chunk is missing or inactive; export again")
+            if job["source"] == "chatgpt-export" and job["segment_version"] != app.CHUNK_VERSION:
+                raise ValueError("Repair legacy conversation chunks before Codex extraction")
             if (job["content_hash"] != item.get("content_hash") or
                     source_hash(job["text"]) != item.get("source_sha256") or
                     job["source_chunk_id"] != item.get("source_chunk_id") or
@@ -161,6 +166,9 @@ def apply_results(packet: dict, result: dict, model: str) -> dict:
                     job["content_hash"] != source_hash(f"{job['source_chunk_id']}\n{job['text']}")):
                 raise ValueError("Source or prompt changed since export; export again")
             facts = validate_facts(received[job_id].get("facts"), job["text"])
+            if (facts and job["source"] == "chatgpt-export"
+                    and app.source_role_for_text(job["text"], job["source"]) not in {"user", "mixed"}):
+                raise ValueError("Unattributed or assistant-only imported text cannot establish user Facts")
             if job["status"] not in {"pending", "failed"} or job["attempts"] >= 3:
                 skipped += 1  # Already processed or owned by an app worker.
                 continue

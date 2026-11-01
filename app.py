@@ -33,6 +33,7 @@ from urllib.parse import parse_qs, urlparse
 from personal_os.ingest import detect_image_mime, multipart_file, multipart_form_file
 from personal_os.llm_ollama import OllamaClient
 from personal_os.moneyforward import moneyforward_projection
+from personal_os.conversation_chunks import split_conversation
 from personal_os.moneyforward_sync import import_snapshot as import_moneyforward_snapshot, MAX_BYTES as MONEYFORWARD_MAX_BYTES
 from personal_os.ocr import extract_text as extract_ocr_text, is_sufficient as ocr_is_sufficient
 
@@ -106,7 +107,7 @@ ENTITY_TYPES = {
 }
 RETRIEVAL_ELIGIBILITY = {"eligible", "pending", "excluded", "conflict"}
 PERSONAL_RELEVANCE = {"personal", "linked_context", "archive_only", "unknown"}
-CHUNK_VERSION = "conversation-turn-v3"
+CHUNK_VERSION = "conversation-turn-v4"
 BACKEND_VERSION = os.environ.get("PERSONAL_OS_BACKEND_VERSION", "2026.07.26-reliability-1")
 LLM_TRACE_EVENTS: list[dict[str, object]] = []
 LLM_TRACE_LOCK = threading.Lock()
@@ -1843,56 +1844,15 @@ def chunk_text(text: str, size: int = 1800) -> list[str]:
 
 
 def conversation_turn_chunks(text: str, size: int = 1800) -> list[str]:
-    """Split a ChatGPT export without joining unrelated turns.
-
-    The importer writes each message as ``role: text`` separated by a blank
-    line.  We keep those message boundaries intact when grouping turns.  A
-    single very long message may still be split, but it is never merged with
-    the next message, so an extracted Fact cannot silently borrow a later
-    topic as its source context.
-    """
-    paragraphs = [part.strip() for part in re.split(r"\n{2,}", str(text or "").strip()) if part.strip()]
-    if not paragraphs:
-        return []
-    # A unit is one user turn plus its immediately following assistant turn.
-    # We deliberately do not pack several exchanges into one chunk: a topic
-    # change at the next user turn must not become hidden Evidence context.
-    units: list[str] = []
-    index = 0
-    while index < len(paragraphs):
-        unit = paragraphs[index]
-        if index + 1 < len(paragraphs):
-            next_part = paragraphs[index + 1]
-            if unit.lower().startswith("user:") and next_part.lower().startswith("assistant:"):
-                unit = f"{unit}\n\n{next_part}"
-                index += 1
-        units.append(unit)
-        index += 1
-
-    chunks: list[str] = []
-    for unit in units:
-        if len(unit) <= size:
-            chunks.append(unit)
-            continue
-        # Keep a long exchange self-contained. Prefer sentence/newline
-        # boundaries and only fall back to a hard cut within this exchange.
-        remainder = unit
-        while len(remainder) > size:
-            boundary = max(
-                (m.start() + 1 for m in re.finditer(r"[。！？.!?]\s+|\n", remainder[:size])),
-                default=0,
-            )
-            cut = boundary if boundary >= max(200, size // 2) else size
-            chunks.append(remainder[:cut].strip())
-            remainder = remainder[cut:].lstrip()
-        if remainder:
-            chunks.append(remainder)
-    return chunks
+    """Keep message roles across blank paragraphs and long continuations."""
+    return split_conversation(text, size)
 
 
 def chunk_may_contain_personal_memory(text: str) -> bool:
     """Cheap local prefilter for ChatGPT chunks before an LLM Job is queued."""
-    normalized = str(text or "").lower()
+    if source_role_for_text(text, "chatgpt-export") not in {"user", "mixed"}:
+        return False
+    normalized = user_evidence_text(text).lower()
     markers = (
         "自分", "私", "本人", "俺", "僕", "自宅", "家賃", "資産", "積立", "持株会",
         "年収", "職種", "症状", "受診", "検査結果", "友人", "家族", "恋人", "同僚",
@@ -2492,7 +2452,8 @@ def classify_personal_relevance(fact: dict, source_text: str = "", entity_type: 
         ),
         "health": ("症状", "処方", "受診", "検査結果", "診断された"),
         "work": ("年収", "職種", "休日", "働き方", "勤務"),
-        "travel": ("訪問した", "旅行した", "行きたい", "予約した", "旅行予定", "旅費", "マイル", "温泉が好き"),
+        "travel": ("訪問した", "旅行した", "行きたい", "予約した", "旅行予定", "旅費", "マイル", "温泉が好き",
+                   "ホテルに戻りたい", "宿に戻りたい", "旅館に戻りたい", "泊まりたい"),
         "housing": ("家賃", "間取り", "最寄駅", "更新", "引っ越した"),
         "relationship": ("友人", "家族", "同僚", "恋人", "会った", "連絡した", "交際", "付き合い", "デート"),
         "lifestyle": ("習慣", "生活費", "疲労度", "睡眠"),
@@ -2665,7 +2626,8 @@ def apply_memory_quality_to_fact(connection: sqlite3.Connection, fact_id: int, s
     source_is_coarse = (
         row["document_source"] == "chatgpt-export"
         and not row["source_attachment_id"]
-        and (row["source_chunk_id"] is None or row["source_chunk_active"] != 1)
+        and (row["source_chunk_id"] is None or row["source_chunk_active"] != 1
+             or source_role_for_text(evidence_text, "chatgpt-export") not in {"user", "mixed"})
     )
     if personal_relevance == "archive_only":
         validation_status, validation_reason, eligibility = "excluded", "Personal OSの正本ではない外部情報のため保管のみ", "excluded"
@@ -2704,6 +2666,13 @@ def apply_memory_quality_to_fact(connection: sqlite3.Connection, fact_id: int, s
         review_state = "rejected"
         if new_category:
             new_category = ensure_memory_category(connection, new_category)
+    if (review_state == "rejected" and personal_relevance == "personal" and not manual_review
+            and not source_is_coarse and row["personal_relevance"] == "archive_only"
+            and str(row["review_reason"] or "") == "Personal OSの正本ではない外部情報のため保管のみ"
+            and fact_policy(fact) != "exclude"):
+        # A corrected relevance rule may restore an explicit user statement;
+        # it must not restore manually rejected or speculative information.
+        review_state, validation_status, eligibility = "pending", "pending", "pending"
     if review_state == "rejected":
         validation_status, eligibility = "excluded", "excluded"
     if personal_relevance == "personal" and eligibility != "excluded" and not source_is_coarse and not manual_review:
@@ -2866,7 +2835,7 @@ def repair_memory_state(reason: str = "manual") -> dict[str, object]:
         raise
 
 
-def prepare_conversation_reanalysis(*, queue_jobs: bool = True) -> dict[str, int]:
+def prepare_conversation_reanalysis(*, queue_jobs: bool = True, entry_ids: list[int] | None = None) -> dict[str, int]:
     """Create turn-level source revisions and quarantine coarse ChatGPT Facts.
 
     Nothing is deleted.  Facts whose provenance points to an inactive legacy
@@ -2875,14 +2844,25 @@ def prepare_conversation_reanalysis(*, queue_jobs: bool = True) -> dict[str, int
     """
     resegmented = 0
     quarantined = 0
+    requested_ids = entry_ids
     with db() as connection:
+        restriction = ""
+        parameters: list[int] = []
+        if requested_ids is not None:
+            parameters = sorted(set(int(value) for value in requested_ids))
+            if not parameters:
+                return {"documents": 0, "quarantined": 0, "queued": 0}
+            restriction = " AND id IN (" + ",".join("?" for _ in parameters) + ")"
         entry_ids = [row["id"] for row in connection.execute(
-            "SELECT id FROM entries WHERE source='chatgpt-export' ORDER BY id"
+            "SELECT id FROM entries WHERE source='chatgpt-export'" + restriction + " ORDER BY id", parameters
         )]
     for entry_id in entry_ids:
         ensure_document_for_entry(entry_id)
         resegmented += 1
     with db() as connection:
+        fact_scope = ""
+        if requested_ids is not None:
+            fact_scope = " AND d.legacy_entry_id IN (" + ",".join("?" for _ in parameters) + ")"
         rows = connection.execute(
             """SELECT f.id,f.source_chunk_id,f.retrieval_eligibility,f.validation_status
                FROM facts f JOIN documents d ON d.id=f.document_id
@@ -2890,6 +2870,7 @@ def prepare_conversation_reanalysis(*, queue_jobs: bool = True) -> dict[str, int
                WHERE d.source='chatgpt-export'
                  AND (f.source_chunk_id IS NULL OR COALESCE(c.is_active,0)=0)
                  AND (COALESCE(f.retrieval_eligibility,'pending')='eligible' OR COALESCE(f.validation_status,'pending')='confirmed')"""
+            + fact_scope, parameters if requested_ids is not None else []
         ).fetchall()
         for row in rows:
             connection.execute(
@@ -5327,7 +5308,7 @@ def reevaluate_finance_transactions() -> dict[str, int]:
 def eligible_finance_transactions(connection: sqlite3.Connection, include_pending: bool = False) -> list[dict]:
     states = ("auto_confirmed", "confirmed") if not include_pending else ("auto_confirmed", "confirmed", "pending")
     marks = ",".join("?" for _ in states)
-    eligibility_filter = "" if include_pending else " AND t.actor='self' AND t.is_actual=1"
+    eligibility_filter = "" if include_pending else " AND t.actor='self' AND t.is_actual=1 AND COALESCE(f.retrieval_eligibility,'pending')='eligible'"
     rows = connection.execute(
         f"""SELECT t.*,f.summary,f.fact_key,f.status AS fact_status,f.confidence,f.source_chunk_id,
                   e.canonical_name AS asset,d.title AS document_title,c.text AS evidence,r.state AS review_state
@@ -5359,7 +5340,19 @@ def save_structured_facts(entry_id: int, facts: list[dict], extractor: str | Non
                           prompt_version: str = PROMPT_VERSION, source_attachment_id: int | None = None,
                           user_confirmed: bool = False, source_chunk_id: int | None = None) -> list[dict]:
     saved = []
-    document_id = ensure_document_for_entry(entry_id)
+    if source_chunk_id:
+        # Explicit provenance must not trigger resegmentation behind the
+        # caller's back or silently fall back to a different source chunk.
+        with db() as connection:
+            source_document = connection.execute(
+                "SELECT d.id FROM documents d JOIN chunks c ON c.document_id=d.id WHERE d.legacy_entry_id=? AND c.id=? AND c.is_active=1",
+                (entry_id, source_chunk_id),
+            ).fetchone()
+        if not source_document:
+            raise ValueError("Source chunk is inactive or does not belong to this entry")
+        document_id = source_document["id"]
+    else:
+        document_id = ensure_document_for_entry(entry_id)
     extractor = extractor or selected_provider("extract")
     model = model or provider_model(extractor)
     with db() as connection:
